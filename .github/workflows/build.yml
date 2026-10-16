@@ -1,0 +1,444 @@
+# Jarvis Android app - APK online build (GitHub Actions)
+name: Build Jarvis APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Project files banao
+        run: |
+          mkdir -p jarvis
+          cd jarvis
+          cat > settings.gradle.kts <<'JEOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "jarvis"
+          include(":app")
+          JEOF
+          cat > build.gradle.kts <<'JEOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          JEOF
+          cat > gradle.properties <<'JEOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          JEOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'JEOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.saddu.jarvis"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.saddu.jarvis"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          JEOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'JEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+              <queries>
+                  <intent><action android:name="android.speech.RecognitionService" /></intent>
+                  <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
+              </queries>
+              <application
+                  android:label="Jarvis"
+                  android:icon="@android:drawable/ic_btn_speak_now"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".AssistantService"
+                      android:exported="false"
+                      android:foregroundServiceType="microphone" />
+              </application>
+          </manifest>
+          JEOF
+          mkdir -p app/src/main/java/com/saddu/jarvis
+          cat > app/src/main/java/com/saddu/jarvis/MainActivity.kt <<'JEOF'
+          package com.saddu.jarvis
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.PowerManager
+          import android.provider.Settings
+          import android.text.InputType
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+              private lateinit var status: TextView
+              private lateinit var btn: Button
+              private lateinit var keyBox: EditText
+              private lateinit var wakeBox: EditText
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val p = getSharedPreferences("j", MODE_PRIVATE)
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(40, 90, 40, 40)
+                  root.setBackgroundColor(Color.parseColor("#0b1020"))
+
+                  fun label(t: String) {
+                      val v = TextView(this)
+                      v.text = t
+                      v.setTextColor(Color.parseColor("#98a2d0"))
+                      v.textSize = 15f
+                      v.setPadding(0, 28, 0, 8)
+                      root.addView(v)
+                  }
+
+                  val title = TextView(this)
+                  title.text = "ðŸ¤– Jarvis Assistant"
+                  title.setTextColor(Color.WHITE)
+                  title.textSize = 24f
+                  root.addView(title)
+
+                  label("Step 1: Gemini API key paste karo")
+                  keyBox = EditText(this)
+                  keyBox.hint = if (p.getString("key", "").isNullOrBlank()) "API key yahan paste karo" else "âœ… Key saved (nayi paste karke badal sakte ho)"
+                  keyBox.setTextColor(Color.WHITE)
+                  keyBox.setHintTextColor(Color.GRAY)
+                  keyBox.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                  root.addView(keyBox)
+
+                  label("Step 2: Naam likho (jarvis ya maya)")
+                  wakeBox = EditText(this)
+                  wakeBox.setText(p.getString("wake", "jarvis"))
+                  wakeBox.setTextColor(Color.WHITE)
+                  root.addView(wakeBox)
+
+                  label("Step 3: Start dabao")
+                  btn = Button(this)
+                  btn.textSize = 18f
+                  btn.setOnClickListener {
+                      if (AssistantService.running) {
+                          stopService(Intent(this, AssistantService::class.java))
+                          AssistantService.running = false
+                          refresh()
+                      } else {
+                          begin()
+                      }
+                  }
+                  root.addView(btn)
+
+                  status = TextView(this)
+                  status.setTextColor(Color.WHITE)
+                  status.textSize = 16f
+                  status.setPadding(0, 30, 0, 0)
+                  root.addView(status)
+
+                  val sv = ScrollView(this)
+                  sv.addView(root)
+                  setContentView(sv)
+                  refresh()
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refresh()
+              }
+
+              private fun refresh() {
+                  if (AssistantService.running) {
+                      btn.text = "â¹ï¸ Stop"
+                      status.text = "ðŸŸ¢ Chal raha hai. Ab app band karke bhi bolo: " + wakeBox.text
+                  } else {
+                      btn.text = "â–¶ï¸ Start"
+                      status.text = "Band hai"
+                  }
+              }
+
+              private fun save() {
+                  val e = getSharedPreferences("j", MODE_PRIVATE).edit()
+                  val k = keyBox.text.toString().trim()
+                  if (k.isNotEmpty()) e.putString("key", k)
+                  val w = wakeBox.text.toString().trim().lowercase()
+                  if (w.isNotEmpty()) e.putString("wake", w)
+                  e.apply()
+              }
+
+              private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_LONG).show()
+
+              private fun begin() {
+                  save()
+                  val p = getSharedPreferences("j", MODE_PRIVATE)
+                  if (p.getString("key", "").isNullOrBlank()) {
+                      toast("Pehle API key paste karo")
+                      return
+                  }
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
+                      return
+                  }
+                  if (!Settings.canDrawOverlays(this)) {
+                      toast("Jarvis ko ON karo, phir wapas aakar Start dabao")
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                      return
+                  }
+                  val pm = getSystemService(PowerManager::class.java)
+                  if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                      toast("Allow dabao, phir Start dabao")
+                      startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+                      return
+                  }
+                  startForegroundService(Intent(this, AssistantService::class.java))
+                  Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 700)
+              }
+
+              override fun onRequestPermissionsResult(rc: Int, perms: Array<out String>, res: IntArray) {
+                  super.onRequestPermissionsResult(rc, perms, res)
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                      toast("Ab dobara Start dabao")
+                  } else {
+                      toast("Mic permission zaroori hai")
+                  }
+              }
+          }
+          JEOF
+          mkdir -p app/src/main/java/com/saddu/jarvis
+          cat > app/src/main/java/com/saddu/jarvis/AssistantService.kt <<'JEOF'
+          package com.saddu.jarvis
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.media.AudioManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.Locale
+
+          class AssistantService : Service() {
+              companion object {
+                  @Volatile var running = false
+              }
+
+              private val main = Handler(Looper.getMainLooper())
+              private var sr: SpeechRecognizer? = null
+              private var tts: TextToSpeech? = null
+              private var ttsReady = false
+              private var speaking = false
+              private var awaiting = false
+              private var wake = "jarvis"
+              private var key = ""
+              private var history = JSONArray()
+
+              private val SYS = """Tum ek voice assistant ho. User Hinglish mein bolta hai. Hamesha SIRF ek JSON do, kuch aur nahi:
+          {"say":"chhota jawab Hinglish mein","action":"none|youtube|search|images|url","query":"search text ya url"}
+          - Gaana ya video chalane ko bole: action=youtube, query=gaane ka naam.
+          - Google search: action=search. Image dhoondhna: action=images.
+          - Website kholna: action=url, query=poora https link.
+          - Email check jaise kaam jo tum nahi kar sakte: action=none aur say mein saaf batao ki abhi ye possible nahi.
+          - Baaki sawal ka seedha chhota jawab say mein do."""
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+                  val p = getSharedPreferences("j", MODE_PRIVATE)
+                  key = p.getString("key", "") ?: ""
+                  wake = (p.getString("wake", "jarvis") ?: "jarvis").lowercase()
+                  startFg("Jarvis sun raha hai. Bolo: " + wake)
+                  if (running) return START_NOT_STICKY
+                  running = true
+                  tts = TextToSpeech(this) { st ->
+                      if (st == TextToSpeech.SUCCESS) {
+                          tts?.language = Locale("hi", "IN")
+                          tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                              override fun onStart(u: String?) {}
+                              override fun onDone(u: String?) { main.post { speaking = false; listen() } }
+                              @Deprecated("old")
+                              override fun onError(u: String?) { main.post { speaking = false; listen() } }
+                          })
+                          ttsReady = true
+                      }
+                      main.post { listen() }
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun startFg(text: String) {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("j", "Jarvis", NotificationManager.IMPORTANCE_LOW))
+                  val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+                  val n = Notification.Builder(this, "j")
+                      .setContentTitle("Jarvis")
+                      .setContentText(text)
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .setContentIntent(pi)
+                      .setOngoing(true)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  } else {
+                      startForeground(1, n)
+                  }
+              }
+
+              private fun names(): List<String> = when (wake) {
+                  "jarvis" -> listOf("jarvis", "à¤œà¤¾à¤°à¥à¤µà¤¿à¤¸", "à¤œà¤¾à¤°à¤µà¤¿à¤¸", "à¤œà¤¾à¤°à¥à¤µà¥€à¤¸", "à¤œà¤¾à¤°à¥à¤µà¤¿à¤¶")
+                  "maya" -> listOf("maya", "à¤®à¤¾à¤¯à¤¾", "maia")
+                  else -> listOf(wake)
+              }
+
+              private fun again() {
+                  main.postDelayed({ listen() }, 400)
+              }
+
+              private fun listen() {
+                  if (!running || speaking) return
+                  val am = getSystemService(AudioManager::class.java)
+                  val m = am.mode
+                  if (m == AudioManager.MODE_IN_CALL || m == AudioManager.MODE_IN_COMMUNICATION || m == AudioManager.MODE_RINGTONE) {
+                      main.postDelayed({ listen() }, 3000)
+                      return
+                  }
+                  sr?.destroy()
+                  val r = SpeechRecognizer.createSpeechRecognizer(this)
+                  r.setRecognitionListener(object : RecognitionListener {
+                      override fun onResults(res: Bundle?) {
+                          val t = res?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                          if (!t.isNullOrBlank()) handle(t) else again()
+                      }
+                      override fun onError(e: Int) {
+                          if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                              stopSelf()
+                          } else {
+                              again()
+                          }
+                      }
+                      override fun onReadyForSpeech(p: Bundle?) {}
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(v: Float) {}
+                      override fun onBufferReceived(b: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onPartialResults(p: Bundle?) {}
+                      override fun onEvent(t: Int, p: Bundle?) {}
+                  })
+                  sr = r
+                  val it = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+                  r.startListening(it)
+              }
+
+              private fun handle(text: String) {
+                  val low = text.lowercase()
+                  var cmd: String? = null
+                  for (n in names()) {
+                      val i = low.indexOf(n)
+                      if (i >= 0) {
+                          cmd = text.substring(i + n.length).trimStart(' ', ',', '.', '-', ':')
+                          break
+                      }
+                  }
+                  val c: String = cmd ?: if (awaiting) text else { again(); return }
+                  awaiting = false
+                  if (c.isBlank()) {
+                      awaiting = true
+                      say("Haan boliye")
+                      return
+                  }
+                  ask(c)
+              }
+
+              private fun say(t: String) {
+                  sr?.destroy()
+                  sr = null
+                  if (!ttsReady) {
+                      again()
+                      return
+                  }
+                  speaking = true
+                  tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "u")
+              }
+
+              private fun ask(c: String) {
+                  sr?.destroy()
+                  sr = null
+                  Thread {
+                      val out = try {
+                          callGemini(c)
+                      } catch (e: Exception) {
+                          JSONObject().put("say", "Kuch gadbad hui. Internet ya API key check karo").put("action", "none")
+                      }
+                      val link = try { buildUrl(out) } catch (e: Exception) { null }
+                      main.post {
+                          say(out.optString("say", "Ho gaya"))
+                          if (link != null) openUrl(link)
+                      }
+                  }.start()
+              }
+
+              private fun msg(role: String, text: String): JSONObject =
+                  JSONObject().put("role", role).put("parts", JSONArray().put(JSONObject().put("text", text)))
+
+              private fun callGemini(cmd: String): JSONObject {
+                  val userMsg = msg("user", cmd)
+                  val contents = JSONArray(history.toString()).put(userMsg)
+                  val body = JSONObject()
+                      .put("systemInstruction", JSONObject().put("parts", JSONArray()
